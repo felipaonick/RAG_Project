@@ -1,0 +1,4 @@
+- [x] 1. Caricare il documento e parsarlo con pymupdf4llm estraendo testo e immagini  
+- [ ] 2. Mettere le immagini in base64 in MongoDB  
+- [ ] 3. Creare dei chunks perfetti utilizzando un LLM; se uno o più link di immagini sono dentro un chunk, allora rimuovere tale link dal testo e mettere l'immagine (come path) nei metadata del chunk  
+- [ ] 4. Utilizzare jina-embeddings-v4 come motore di embedding per i chunks usando una dimensione vettoriale elevata per trattenere più informazione possibile  
