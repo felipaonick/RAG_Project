@@ -59,7 +59,7 @@ def create_documents(chunks: list[str]) -> list[Document]:
     for i, chunk in enumerate(chunks):
         
         # estraggo le immagini dal markdown
-        image_links = re.findall(r'!\[\]\((img_out/[^)]+)\)', chunk)
+        image_links = re.findall(r'!\[\]\(([^)]+)\)', chunk)
 
         # rimuovo i link immagine dal contenuto
         for link in image_links:

@@ -8,10 +8,29 @@ from pathlib import Path
 from datetime import datetime
 from uuid import uuid4
 from langchain.schema import Document
+import httpx
+from transformers import AutoModel
+import torch
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, SearchParams
+from qdrant_client.http.models import VectorParams, Distance, PointStruct
+from langchain_ollama import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableParallel, RunnableMap, RunnableSequence
+from langchain_core.output_parsers import StrOutputParser
+from pathlib import Path
+import base64
+from PIL import Image
+from io import BytesIO
+import os
+from transformers import AutoModel
 
 from utilities.dataloader import DocumentManager
 from utilities.mongodb import MongoManager
-from utilities.chunking_utilities import split_markdown_text, create_documents
+from utilities.chunking import split_markdown_text, create_documents
+from utilities.embeddings import JinaEmbeddings, get_embedding_model
+from utilities.retrieving import retriever_jina
+
 
 
 app = FastAPI()
@@ -24,7 +43,18 @@ UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 doc_manager = DocumentManager()
 mongo_manager = MongoManager(connection_string="mongodb://localhost:27017")
+# connessione a Qdrant (Docker Locale)
+client = QdrantClient(url="http://localhost:6333")
 
+HF_TOKEN_STORE = {}
+
+
+###################################### Pydantic Schemas ############################
+
+
+class RetrieverResponse(BaseModel):
+    answer: str
+    images: list[str]
 
 
 ####################################### ENDPOINTS ###################################
@@ -55,7 +85,7 @@ async def upload_and_parse_pdf(file: UploadFile = File(...)):
         content = await file.read()
         f.write(content)
 
-   # Parsa il PDF usando DocumentManager
+    # Parsa il PDF usando DocumentManager
     parsed_text = doc_manager.read_local_pdf(str(file_path))
 
     # Estrai il nome base senza estensione
@@ -198,8 +228,226 @@ async def chunking(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Errore durante il chunking: {str(e)}")
     
 
+@router.post("/hf-login")
+async def hf_login(input: str):
+    """
+    Effettua il login a HuggingFace tramite token personale.
+
+    - Verifica il token con l'API HuggingFace (`/whoami-v2`)
+    - Salva il token e le info utente in memoria (HF_TOKEN_STORE)
+    - Non salva nulla su disco
+    - Usare solo in ambienti sicuri (HTTPS)
+    """
+
+    # verifica il token con Hugging Face
+    headers = {"Authorization": f"Bearer {input}"}
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get("https://huggingface.co/api/whoami-v2", headers=headers)
+
+    
+    if response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Token HuggingFace non valido")
+    
+    user_info = response.json()
+
+    HF_TOKEN_STORE["token"] = input
+    HF_TOKEN_STORE["user"] = user_info.get("name", "unknown")
+    
+
+    return {
+        "message": "Login effettuato con successo",
+        "user": user_info.get("name", "unknown"),
+        "email": user_info.get("email", None)
+    }
 
 
+@router.post("/embeddings")
+async def embeddings(file_name: str):
+    """
+    🔍 Genera embedding da documenti e li salva in Qdrant.
+
+    - Prende `file_name` dalla richiesta.
+    - Recupera documenti e metadati da MongoDB.
+    - Calcola gli embedding del testo usando JinaEmbeddings.
+    - Crea o usa una collection Qdrant con dimensione vettoriale appropriata.
+    - Inserisce o aggiorna i punti con ID univoco (upsert) per evitare duplicati.
+
+    ✅ Parametri:
+      - file_name (str): nome del file su cui eseguire embedding
+
+    ✅ Risposta:
+      - message: conferma del numero di embedding inseriti
+      - collection_name: nome della collection di destinazione
+      - vector_size: dimensionalità dei vettori salvati
+    """
+
+    token = HF_TOKEN_STORE.get("token", "")
+    if not token:
+        raise HTTPException(status_code=401, detail="Non autenticato su Hugging Face")
+    
+    try:
+        model = get_embedding_model(token)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Errore nel caricamento del modello: {e}")
+
+    embedding_manager = JinaEmbeddings(model=model)
+
+    documents = mongo_manager.read_from_mongo(query={"filename": file_name}, output_format="object", database_name="Leonardo", collection_name="documents")
+
+    print(len(documents))
+
+    document_contents = []
+    document_metadata = []
+    for document in documents:
+        page_content = document.get("page_content", "")
+        metadata = document.get("metadata", {})
+        metadata["filename"] = file_name
+
+        document_contents.append(page_content)
+        document_metadata.append(metadata)
+
+    if len(document_contents) != len(document_metadata):
+        raise Exception("Contents e metadata non coincidono!")
+    
+    print(f"Contents: {len(document_contents)}, Metadata: {len(document_metadata)}")
+
+
+    # calcola gli embeddings solo sui page_contents
+    embeddings = embedding_manager.embed_documents(document_contents)
+
+
+    print(f"Numero di embeddings: {len(embeddings)}, dimensionalità : {len(embeddings[0])}")
+
+
+    # creiamo la collection se già non eseiste
+    collection_name = "leonardo"
+    vector_size = len(embeddings[0]) # 2048
+
+    if not client.collection_exists(collection_name):
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+        )
+    
+    # prepariamo i points per i nostri embeddings
+    points = []
+    for md, vec in zip(document_metadata, embeddings):
+        chunk_no = md["chunk_no"]
+        # ID univoco per chunk/documento
+        id = f"{file_name}-{chunk_no}"
+        points.append(
+            PointStruct(id=id, vector=vec, payload=md)
+        )
+
+
+    # inseriamo o aggiorniamo i vettori
+    # se hanno gli stessi ID si aggiornano/sovrascrivono evitando duplicati
+    client.upsert(
+        collection_name=collection_name,
+        points=points
+    )
+
+    return {
+        "message": f"{len(embeddings)} embeddings con dimensionalità {vector_size} sono stati inseriti correttamente nella collection",
+        "collection_name": collection_name,
+        "vector_size": vector_size
+    }
+
+
+@router.post("/retriever", response_model=RetrieverResponse, status_code=200)
+async def retriever(file_name: str, query: str):
+    """
+    🔍 Risponde a una query usando embeddings da un documento prefiltrato
+    - file_name: nome del documento nel db da interrogare
+    - query: domanda da porre al modello
+    Restituisce la risposta testuale + eventuali immagini correlate (se negli embeddings retrivati erano allegate delle immagini)
+    """
+    token = HF_TOKEN_STORE.get("token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Non autenticato su Hugging Face")
+    
+    try:
+        model = get_embedding_model(token)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Errore nel caricamento del modello: {e}")
+
+    query_filter = Filter(must=[
+        FieldCondition(key="filename", match=MatchValue(value=file_name))
+    ])
+
+
+    template = """Answer the question based only on the following contetext:
+    {context}
+
+    Question: {question}"""
+
+    prompt = ChatPromptTemplate.from_template(template)
+
+    llm = ChatOllama(model="qwen2.5:7b", base_url="http://localhost:11434", temperature=0.3)
+
+    retriever_ji_full = RunnableLambda(lambda query: (*retriever_jina(query=query, model=model, query_filter=query_filter), query))
+
+    split = RunnableMap({
+        "context": RunnableLambda(lambda res: res[0]),
+        "images": RunnableLambda(lambda res: res[1]),
+        "question": RunnableLambda(lambda res: res[2]),
+    })
+
+    chain_model = (
+        prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    parallel = retriever_ji_full | split
+
+    full_chain = RunnableSequence(
+        parallel,
+        # produce dict con context, images e question
+        RunnableLambda(lambda data: {
+            # genera la risposta llm
+            "images": data['images'],
+            "answer": chain_model.invoke({"context": data["context"], "question": data["question"]})
+        })
+    )
+
+    try:
+        result = full_chain.invoke(query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Errore durante il retrieve/LLM: {e}")
+
+    image_files = [Path(p).name for p in result["images"]]
+
+    main_dir = Path(__file__).resolve().parent.parent
+    output_dir = main_dir / "utilities" / "retrieved_images"
+    os.makedirs(output_dir, exist_ok=True)
+    saved_paths = []
+
+    for image_name in image_files:
+        docs = mongo_manager.read_from_mongo(
+            query={"filename": image_name},
+            output_format="object",
+            database_name="Leonardo",
+            collection_name="images"
+        )
+        if not docs:
+            continue
+        doc = docs[0]
+        content_b64 = doc.get("content_base64")
+        if not content_b64:
+            continue
+
+        try:
+            image_data = base64.b64decode(content_b64)
+            img = Image.open(BytesIO(image_data))
+            save_path = output_dir / image_name
+            img.save(save_path)
+            saved_paths.append(str(save_path))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Errore nel salvataggio immagine {image_name}: {e}")
+
+    return {"answer": result["answer"], "images": saved_paths}
 
 
 # Includi con prefisso e tag

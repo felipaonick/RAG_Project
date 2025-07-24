@@ -122,7 +122,7 @@ class MongoManager:
             try:
                 loaded_data = json.loads(query)
             except json.JSONDecodeError as e:
-                return f"❌ Errore nel parsing JSON: {e}"
+                return f"Errore nel parsing JSON: {e}"
         else: # è già un dizionario
             loaded_data = query
 
