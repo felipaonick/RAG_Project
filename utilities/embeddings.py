@@ -59,7 +59,6 @@ def get_embedding_model(token: str):
         "jinaai/jina-embeddings-v4",
         token=token,
         device_map="cuda" if torch.cuda.is_available() else "cpu",
-        torch_dtype=torch.bfloat16,  # consistent with model spec
         trust_remote_code=True
     )
 

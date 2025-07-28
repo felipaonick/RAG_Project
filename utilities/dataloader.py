@@ -6,12 +6,14 @@ from datetime import datetime
 from uuid import uuid4
 
 
-img_path = "C:/Users/felip/Desktop/import-pc/Leonardo_RAG/utilities/img_out"
 
 class DocumentManager:
-    def _init__(self):
+    def __init__(self):
         """Inizializza il DocumentManager"""
-        pass
+
+        # Path dinamico valido anche dentro Docker
+        self.img_path = Path(__file__).resolve().parent.parent / "utilities" / "img_out"
+        self.img_path.mkdir(parents=True, exist_ok=True)
 
     # metodi per documenti locali
     def read_local_pdf(self, file_path: str):
@@ -36,12 +38,12 @@ class DocumentManager:
                     doc,
                     write_images=True,
                     page_chunks=True,
-                    image_path=img_path,
+                    image_path=str(self.img_path),
                     image_format="png",
                     show_progress=True,
                 )
 
-                print(f"Immagini del documento salvate in {img_path}")
+                print(f"Immagini del documento salvate in {str(self.img_path)}")
 
                 # colleghiamo il testo di ogni pagina
                 full_text = "\n".join([page['text'] for page in page_dicts if 'text' in page])

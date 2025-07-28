@@ -14,9 +14,9 @@ import os
 from transformers import AutoModel
 
 # connessione a Qdrant (Docker Locale)
-client = QdrantClient(url="http://localhost:6333")
+client = QdrantClient(url="http://qdrant:6333")
 
-mongo_manager = MongoManager(connection_string="mongodb://localhost:27017")
+mongo_manager = MongoManager(connection_string="mongodb://host.docker.internal:27017")
 
 # con parametri di ricerca exact=True 
 # 🔍 Ricerca con exact=True
@@ -83,7 +83,7 @@ def retriever_jina(query: str, model: AutoModel, query_filter: Filter):
     embeddings_manager = JinaEmbeddings(model)
     emb_query = embeddings_manager.embed_query(query)
     scored_points = client.query_points(
-        collection_name="leonardo",
+        collection_name="hitachi",
         query=emb_query,
         query_filter=query_filter,
         search_params=SearchParams(hnsw_ef=128, exact=False),

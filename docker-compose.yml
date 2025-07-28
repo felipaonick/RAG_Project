@@ -1,13 +1,41 @@
+services:
+
+    app:
+      build: .  # dice di creare l'immagine in base al Dockerfile nella cartella corrente
+      container_name: hitachi-rag-application
+      ports:
+        - "8091:8091"
+      volumes:
+        - ./utilities/img_out:/app/img_out
+        - ./utilities/retrieved_images:/app/retrieved_images
+        - ./input_data:/app/input_data
+        - ~/.cache/huggingface:/root/.cache/huggingface
+      environment:
+        - HF_TOKEN=${HF_TOKEN}
+        # Point to Docker OLLAMA service
+        - OLLAMA_BASE_URL=http://host.docker.internal:11434
+        # Point to Docker QDRANT service
+        - QDRANT_URL=http://qdrant:6333
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - capabilities: [gpu]
+      depends_on:
+        - qdrant
+      restart: unless-stopped
+
+
+    qdrant:
+      image: qdrant/qdrant:latest
+      container_name: qdrant-local
+      ports:
+        - "6333:6333"
+        - "6334:6334" # gRPC port, optional if you need it
+      volumes:
+        - ./qdrant_data:/qdrant/storage
+      restart: unless-stopped
+
 volumes:
   qdrant_data:
-
-services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant_local
-    restart: always
-    ports: 
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - ./qdrant_data:/qdrant/storage
+    driver: local

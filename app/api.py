@@ -24,6 +24,10 @@ from PIL import Image
 from io import BytesIO
 import os
 from transformers import AutoModel
+from pypdf import PdfReader
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+load_dotenv()
 
 from utilities.dataloader import DocumentManager
 from utilities.mongodb import MongoManager
@@ -31,9 +35,42 @@ from utilities.chunking import split_markdown_text, create_documents
 from utilities.embeddings import JinaEmbeddings, get_embedding_model
 from utilities.retrieving import retriever_jina
 
+# @asynccontextmanager
+# 📚 Quando usarlo
+# • Quando hai bisogno di setup asincrono (es. apertura pool, handshake, caricamento risorse)
+# • E di teardown garantito, anche in caso di eccezioni
+# • Senza scrivere una classe completa con __aenter__/__aexit__
 
+# Ecco un esempio minimale:
 
-app = FastAPI()
+# @asynccontextmanager
+# async def lifespan(app):
+#     # setup al bootstrap
+#     yield
+#     # cleanup alla chiusura
+# ✅ In sintesi
+# @asynccontextmanager è un decoratore dedicato a generatori asincroni.
+
+# Serve per creare context manager usufruibili con async with, con setup e cleanup garantiti.
+
+# Non è un decoratore generico per qualunque funzione async.
+
+# Con lifespan, invece, il modello si carica una sola volta al bootstrap dell’app, mantenendo memoria tra le chiamate.
+
+model = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global model
+    print("Caricamento del modello Jina Emebddings...")
+    hf_token=os.getenv("HF_TOKEN")
+    model = get_embedding_model(hf_token)
+    print("✔️ Modello caricato")
+    yield
+    # eventualmente cleanup
+    model = None
+
+app = FastAPI(lifespan=lifespan)
 
 router = APIRouter()
 
@@ -42,11 +79,11 @@ UPLOAD_FOLDER = Path(__file__).resolve().parent.parent / "input_data"
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 doc_manager = DocumentManager()
-mongo_manager = MongoManager(connection_string="mongodb://localhost:27017")
+mongo_manager = MongoManager(connection_string="mongodb://host.docker.internal:27017")
 # connessione a Qdrant (Docker Locale)
-client = QdrantClient(url="http://localhost:6333")
+client = QdrantClient(url="http://qdrant:6333")
 
-HF_TOKEN_STORE = {}
+#HF_TOKEN_STORE = {}
 
 
 ###################################### Pydantic Schemas ############################
@@ -176,6 +213,33 @@ async def chunking(file: UploadFile = File(...)):
     if not file.filename.endswith(".md"):
         raise HTTPException(status_code=400, detail="Il file deve essere in formato Markdown (.md)")
     
+
+    main_dir = Path(__file__).resolve().parent.parent
+    md_path = main_dir / "input_data" / file.filename
+
+    pdf_path = md_path.with_suffix(".pdf")
+
+    if not pdf_path.exists():
+        raise HTTPException(status_code=400, detail=f"Non trovato PDF: {pdf_path.name}")
+    
+
+    try:
+        pdf_reader = PdfReader(str(pdf_path))
+        num_pages = len(pdf_reader.pages)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Errore lettura PDF: {e}")
+    
+
+    # Adatta chunk_size e overlap
+    if num_pages < 10:
+        chunk_size, chunk_overlap = 500, 10
+    elif num_pages <= 50:
+        chunk_size, chunk_overlap = 1000, 50
+    elif num_pages <= 100:
+        chunk_size, chunk_overlap = 2000, 100
+    else:
+        chunk_size, chunk_overlap = 3000, 200
+    
     try:
         # Legge il contenuto del file
         contents = await file.read()
@@ -193,7 +257,7 @@ async def chunking(file: UploadFile = File(...)):
             )
 
         # Step 2: Chunking
-        chunks = split_markdown_text(text)
+        chunks = split_markdown_text(text=text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
         # Step 3: Creazione Documents
         docs: List[Document] = create_documents(chunks)
@@ -228,38 +292,38 @@ async def chunking(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Errore durante il chunking: {str(e)}")
     
 
-@router.post("/hf-login")
-async def hf_login(input: str):
-    """
-    Effettua il login a HuggingFace tramite token personale.
+# @router.post("/hf-login")
+# async def hf_login(input: str):
+#     """
+#     Effettua il login a HuggingFace tramite token personale.
 
-    - Verifica il token con l'API HuggingFace (`/whoami-v2`)
-    - Salva il token e le info utente in memoria (HF_TOKEN_STORE)
-    - Non salva nulla su disco
-    - Usare solo in ambienti sicuri (HTTPS)
-    """
+#     - Verifica il token con l'API HuggingFace (`/whoami-v2`)
+#     - Salva il token e le info utente in memoria (HF_TOKEN_STORE)
+#     - Non salva nulla su disco
+#     - Usare solo in ambienti sicuri (HTTPS)
+#     """
 
-    # verifica il token con Hugging Face
-    headers = {"Authorization": f"Bearer {input}"}
+#     # verifica il token con Hugging Face
+#     headers = {"Authorization": f"Bearer {input}"}
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get("https://huggingface.co/api/whoami-v2", headers=headers)
+#     async with httpx.AsyncClient() as client:
+#         response = await client.get("https://huggingface.co/api/whoami-v2", headers=headers)
 
     
-    if response.status_code != 200:
-        raise HTTPException(status_code=401, detail="Token HuggingFace non valido")
+#     if response.status_code != 200:
+#         raise HTTPException(status_code=401, detail="Token HuggingFace non valido")
     
-    user_info = response.json()
+#     user_info = response.json()
 
-    HF_TOKEN_STORE["token"] = input
-    HF_TOKEN_STORE["user"] = user_info.get("name", "unknown")
+#     HF_TOKEN_STORE["token"] = input
+#     HF_TOKEN_STORE["user"] = user_info.get("name", "unknown")
     
 
-    return {
-        "message": "Login effettuato con successo",
-        "user": user_info.get("name", "unknown"),
-        "email": user_info.get("email", None)
-    }
+#     return {
+#         "message": "Login effettuato con successo",
+#         "user": user_info.get("name", "unknown"),
+#         "email": user_info.get("email", None)
+#     }
 
 
 @router.post("/embeddings")
@@ -282,14 +346,14 @@ async def embeddings(file_name: str):
       - vector_size: dimensionalità dei vettori salvati
     """
 
-    token = HF_TOKEN_STORE.get("token", "")
-    if not token:
-        raise HTTPException(status_code=401, detail="Non autenticato su Hugging Face")
+    # token = HF_TOKEN_STORE.get("token", "")
+    # if not token:
+    #     raise HTTPException(status_code=401, detail="Non autenticato su Hugging Face")
     
-    try:
-        model = get_embedding_model(token)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore nel caricamento del modello: {e}")
+    # try:
+    #     model = get_embedding_model(token)
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=f"Errore nel caricamento del modello: {e}")
 
     embedding_manager = JinaEmbeddings(model=model)
 
@@ -321,7 +385,7 @@ async def embeddings(file_name: str):
 
 
     # creiamo la collection se già non eseiste
-    collection_name = "leonardo"
+    collection_name = "hitachi"
     vector_size = len(embeddings[0]) # 2048
 
     if not client.collection_exists(collection_name):
@@ -335,7 +399,7 @@ async def embeddings(file_name: str):
     for md, vec in zip(document_metadata, embeddings):
         chunk_no = md["chunk_no"]
         # ID univoco per chunk/documento
-        id = f"{file_name}-{chunk_no}"
+        id = str(uuid4())
         points.append(
             PointStruct(id=id, vector=vec, payload=md)
         )
@@ -363,14 +427,14 @@ async def retriever(file_name: str, query: str):
     - query: domanda da porre al modello
     Restituisce la risposta testuale + eventuali immagini correlate (se negli embeddings retrivati erano allegate delle immagini)
     """
-    token = HF_TOKEN_STORE.get("token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Non autenticato su Hugging Face")
+    # token = HF_TOKEN_STORE.get("token")
+    # if not token:
+    #     raise HTTPException(status_code=401, detail="Non autenticato su Hugging Face")
     
-    try:
-        model = get_embedding_model(token)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore nel caricamento del modello: {e}")
+    # try:
+    #     model = get_embedding_model(token)
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=f"Errore nel caricamento del modello: {e}")
 
     query_filter = Filter(must=[
         FieldCondition(key="filename", match=MatchValue(value=file_name))
@@ -384,7 +448,7 @@ async def retriever(file_name: str, query: str):
 
     prompt = ChatPromptTemplate.from_template(template)
 
-    llm = ChatOllama(model="qwen2.5:7b", base_url="http://localhost:11434", temperature=0.3)
+    llm = ChatOllama(model="qwen2.5:7b", base_url="http://host.docker.internal:11434", temperature=0.3)
 
     retriever_ji_full = RunnableLambda(lambda query: (*retriever_jina(query=query, model=model, query_filter=query_filter), query))
 
