@@ -80,8 +80,12 @@ mongo_manager = MongoManager(connection_string="mongodb://host.docker.internal:2
 # * Serve a regolare il trade-off **accuratezza vs velocità/risorse**.
 
 def retriever_jina(query: str, model: AutoModel, query_filter: Filter):
+    print(f"[DEBUG] [retriever_jina] Query: {query}")
+    
     embeddings_manager = JinaEmbeddings(model)
     emb_query = embeddings_manager.embed_query(query)
+    print(f"[DEBUG] [retriever_jina] Embedding query shape: {len(emb_query)}")
+
     scored_points = client.query_points(
         collection_name="hitachi",
         query=emb_query,
@@ -90,26 +94,38 @@ def retriever_jina(query: str, model: AutoModel, query_filter: Filter):
         limit=5,
         with_payload=True
     )
+    print(f"[DEBUG] [retriever_jina] Punti trovati in Qdrant: {len(scored_points.points)}")
 
     contents = []
-    #Serial per ricercare in Mongo
+
     for pt in scored_points.points:
+        print(f"[DEBUG] [retriever_jina] Qdrant match -> chunk_no: {pt.payload.get('chunk_no')}, filename: {pt.payload.get('filename')}")
+        
         doc = mongo_manager.read_from_mongo(
             query={"metadata.chunk_no": pt.payload["chunk_no"], "filename": pt.payload["filename"]},
             output_format="object",
-            database_name="Leonardo", collection_name="documents"
-        ) # è una lista di dizionari
-        content = doc[0]["page_content"]
-        images = doc[0]["metadata"].get("images", [])
+            database_name="Leonardo",
+            collection_name="documents"
+        )
+
+        if not doc:
+            print(f"[WARNING] [retriever_jina] Nessun documento trovato in MongoDB per chunk_no={pt.payload.get('chunk_no')}")
+            continue
+
+        content = doc[0].get("page_content", "")
+        images = doc[0].get("metadata", {}).get("images", [])
+
+        print(f"[DEBUG] [retriever_jina] Contenuto MongoDB trovato. Lunghezza testo: {len(content)}, # immagini: {len(images)}")
 
         contents.append({"page_content": content, "images": images})
 
-    full_images = []
-    for content in contents:
-        if content["images"]:
-            full_images.extend(content["images"])
+    full_images = [img for c in contents for img in c.get("images", [])]
+    full_content = "\n".join(c.get("page_content", "") for c in contents)
 
-
-    full_content = "\n".join(content.get("page_content", "") for content in contents)
+    print(f"[DEBUG] [retriever_jina] Lunghezza totale context: {len(full_content)}")
+    print(f"[DEBUG] [retriever_jina] Numero totale immagini associate: {len(full_images)}")
 
     return full_content, full_images
+
+
+

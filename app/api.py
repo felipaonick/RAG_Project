@@ -419,6 +419,7 @@ async def embeddings(file_name: str):
     }
 
 
+
 @router.post("/retriever", response_model=RetrieverResponse, status_code=200)
 async def retriever(file_name: str, query: str):
     """
@@ -427,14 +428,6 @@ async def retriever(file_name: str, query: str):
     - query: domanda da porre al modello
     Restituisce la risposta testuale + eventuali immagini correlate (se negli embeddings retrivati erano allegate delle immagini)
     """
-    # token = HF_TOKEN_STORE.get("token")
-    # if not token:
-    #     raise HTTPException(status_code=401, detail="Non autenticato su Hugging Face")
-    
-    # try:
-    #     model = get_embedding_model(token)
-    # except Exception as e:
-    #     raise HTTPException(status_code=500, detail=f"Errore nel caricamento del modello: {e}")
 
     query_filter = Filter(must=[
         FieldCondition(key="filename", match=MatchValue(value=file_name))
@@ -448,7 +441,11 @@ async def retriever(file_name: str, query: str):
 
     prompt = ChatPromptTemplate.from_template(template)
 
-    llm = ChatOllama(model="qwen2.5:7b", base_url="http://host.docker.internal:11434", temperature=0.3)
+    llm = ChatOllama(model="llama3.1:8b", base_url="http://host.docker.internal:11434", temperature=0.2)
+
+    if model is None:
+        raise HTTPException(status_code=500, detail="❌ Modello di embedding Jina non caricato correttamente.")
+
 
     retriever_ji_full = RunnableLambda(lambda query: (*retriever_jina(query=query, model=model, query_filter=query_filter), query))
 
@@ -457,6 +454,7 @@ async def retriever(file_name: str, query: str):
         "images": RunnableLambda(lambda res: res[1]),
         "question": RunnableLambda(lambda res: res[2]),
     })
+
 
     chain_model = (
         prompt
@@ -477,6 +475,7 @@ async def retriever(file_name: str, query: str):
     )
 
     try:
+        print("[INFO] Invocazione LLM in corso...")
         result = full_chain.invoke(query)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Errore durante il retrieve/LLM: {e}")
