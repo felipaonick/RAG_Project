@@ -6,8 +6,8 @@ services:
       ports:
         - "8091:8091"
       volumes:
-        - ./utilities/img_out:/app/img_out
-        - ./utilities/retrieved_images:/app/retrieved_images
+        - ./utilities/img_out:/app/utilities/img_out
+        - ./utilities/retrieved_images:/app/utilities/retrieved_images
         - ./input_data:/app/input_data
         - ~/.cache/huggingface:/root/.cache/huggingface
       environment:

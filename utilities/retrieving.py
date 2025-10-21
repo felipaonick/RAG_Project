@@ -1,6 +1,6 @@
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, SearchParams
-from utilities.embeddings import JinaEmbeddings, get_embedding_model
+from langchain_core.embeddings import Embeddings
 from utilities.mongodb import MongoManager
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
@@ -9,6 +9,7 @@ from langchain_core.output_parsers import StrOutputParser
 from pathlib import Path
 import base64
 from PIL import Image
+from typing import Tuple, List
 from io import BytesIO
 import os
 from transformers import AutoModel
@@ -79,51 +80,66 @@ mongo_manager = MongoManager(connection_string="mongodb://host.docker.internal:2
 # * Non limita i risultati, ma **ammassa i migliori candidati prima di selezionare i finali**.
 # * Serve a regolare il trade-off **accuratezza vs velocità/risorse**.
 
-def retriever_jina(query: str, model: AutoModel, query_filter: Filter):
-    print(f"[DEBUG] [retriever_jina] Query: {query}")
-    
-    embeddings_manager = JinaEmbeddings(model)
-    emb_query = embeddings_manager.embed_query(query)
-    print(f"[DEBUG] [retriever_jina] Embedding query shape: {len(emb_query)}")
+def retriever_generic(query: str, embeddings: Embeddings, query_filter: Filter, collection_name: str):
+    print(f"[DEBUG] [retriever] Query: {query}")
+
+    # 1) Embedding della query (provider-agnostic)
+    emb_query = embeddings.embed_query(query)
+    print(f"[DEBUG] [retriever] Embedding query dim: {len(emb_query)}")
+
+    # 2) Ricerca in Qdrant con filtro (es. per filename)
 
     scored_points = client.query_points(
-        collection_name="hitachi",
+        collection_name=collection_name,
         query=emb_query,
         query_filter=query_filter,
         search_params=SearchParams(hnsw_ef=128, exact=False),
         limit=5,
         with_payload=True
     )
-    print(f"[DEBUG] [retriever_jina] Punti trovati in Qdrant: {len(scored_points.points)}")
+    print(f"[DEBUG] [retriever] Punti trovati in Qdrant: {len(scored_points.points)}")
 
-    contents = []
+    contents: List[dict] = []
+    seen = set()
 
     for pt in scored_points.points:
-        print(f"[DEBUG] [retriever_jina] Qdrant match -> chunk_no: {pt.payload.get('chunk_no')}, filename: {pt.payload.get('filename')}")
-        
+        chunk_no = pt.payload.get("chunk_no")
+        filename = pt.payload.get("filename")
+        print(f"[DEBUG] [retriever] Match -> chunk_no={chunk_no}, filename={filename}")
+
+        if chunk_no is None or filename is None:
+            print("[WARNING] [retriever] Payload senza chunk_no/filename, skip")
+            continue
+
+        key = (filename, chunk_no)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # 3) Fetch chunk da Mongo
         doc = mongo_manager.read_from_mongo(
-            query={"metadata.chunk_no": pt.payload["chunk_no"], "filename": pt.payload["filename"]},
+            query={"metadata.chunk_no": chunk_no, "filename": filename},
             output_format="object",
             database_name="Leonardo",
-            collection_name="documents"
+            collection_name="documents",
         )
 
         if not doc:
-            print(f"[WARNING] [retriever_jina] Nessun documento trovato in MongoDB per chunk_no={pt.payload.get('chunk_no')}")
+            print(f"[WARNING] [retriever] Nessun doc in Mongo per {key}")
             continue
 
-        content = doc[0].get("page_content", "")
-        images = doc[0].get("metadata", {}).get("images", [])
-
-        print(f"[DEBUG] [retriever_jina] Contenuto MongoDB trovato. Lunghezza testo: {len(content)}, # immagini: {len(images)}")
+        content = doc[0].get("page_content", "") or ""
+        images = doc[0].get("metadata", {}).get("images", []) or []
+        print(f"[DEBUG] [retriever] Testo len={len(content)}, #img={len(images)}")
 
         contents.append({"page_content": content, "images": images})
 
+    # 4) Aggregazione
     full_images = [img for c in contents for img in c.get("images", [])]
     full_content = "\n".join(c.get("page_content", "") for c in contents)
 
-    print(f"[DEBUG] [retriever_jina] Lunghezza totale context: {len(full_content)}")
-    print(f"[DEBUG] [retriever_jina] Numero totale immagini associate: {len(full_images)}")
+    print(f"[DEBUG] [retriever] Context totale len={len(full_content)}")
+    print(f"[DEBUG] [retriever] Immagini totali={len(full_images)}")
 
     return full_content, full_images
 

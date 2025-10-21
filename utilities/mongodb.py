@@ -167,7 +167,7 @@ class MongoManager:
 if __name__ == "__main__":
 
     # inizializza MongoManager con una connection string
-    mongo_manager = MongoManager(connection_string="mongodb://host.docker.internal:27017", default_database="Leonardo")
+    mongo_manager = MongoManager(connection_string="mongodb://localhost:27017", default_database="Leonardo")
 
     collection = mongo_manager._get_collection(collection_name="example_collection")
 

@@ -1,6 +1,6 @@
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, SearchParams
-from utilities.embeddings import JinaEmbeddings, get_embedding_model
+from utilities.jina_embeddings import JinaEmbeddings, get_embedding_model
 from utilities.mongodb import MongoManager
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate

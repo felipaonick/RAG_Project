@@ -1,4 +1,4 @@
-from utilities.embeddings import JinaEmbeddings, get_embedding_model
+from utilities.jina_embeddings import JinaEmbeddings, get_embedding_model
 from utilities.mongodb import MongoManager
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import VectorParams, Distance, PointStruct

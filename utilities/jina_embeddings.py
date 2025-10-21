@@ -44,22 +44,13 @@ class JinaEmbeddings(Embeddings):
     
 
 
-def get_embedding_model(token: str):
-
+def load_hf_jina_model(model_id: str, token: str):
     if not token:
-        raise RuntimeError("Non sei autenticato con HugginFace")
-    
-    # Verifica disponibilità CUDA
-    print("Torch version:", torch.__version__)
-    print("CUDA version:", torch.version.cuda)
-    print("CUDA available:", torch.cuda.is_available())
-
-    
-    model = AutoModel.from_pretrained(
-        "jinaai/jina-embeddings-v4",
+        raise RuntimeError("HF token mancante per provider=jin‍a")
+    print("Torch:", torch.__version__, "| CUDA avail:", torch.cuda.is_available())
+    return AutoModel.from_pretrained(
+        model_id,
         token=token,
         device_map="cuda" if torch.cuda.is_available() else "cpu",
         trust_remote_code=True
     )
-
-    return model
