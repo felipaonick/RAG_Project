@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"  # REST API + dashboard
+      - "6334:6334"  # gRPC
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      # Imposta la telemetria facoltativa su "false" se vuoi disattivarla
+      QDRANT__TELEMETRY_DISABLED: "true"
+      # (opzionale) puoi impostare il numero di thread per l'indicizzazione
+      QDRANT__STORAGE__OPTIMIZER__DEFAULT_SEGMENT_NUMBER: "1"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+
+volumes:
+  qdrant_storage:
+    driver: local
